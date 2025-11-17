@@ -646,7 +646,7 @@ func TestCrashRecovery_MixedPageAccess(t *testing.T) {
 
 		// Page should be in dirty page table
 		dirtyPages := rm.GetDirtyPageTable()
-		if _, exists := dirtyPages[newMockPageID(100)]; !exists {
+		if _, exists := dirtyPages[newMockPageID(100).HashCode()]; !exists {
 			t.Error("Page 100 should be in dirty page table")
 		}
 	}

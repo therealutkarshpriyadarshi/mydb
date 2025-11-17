@@ -21,8 +21,8 @@ type RecoveryManager struct {
 	mutex     sync.RWMutex
 
 	// Analysis phase results
-	dirtyPageTable   map[primitives.PageID]primitives.LSN // pageID -> first LSN that dirtied it
-	transactionTable map[int64]*TransactionInfo            // tidID -> transaction info
+	dirtyPageTable   map[primitives.HashCode]primitives.LSN // pageID.HashCode() -> first LSN that dirtied it
+	transactionTable map[int64]*TransactionInfo              // tidID -> transaction info
 
 	// Recovery statistics
 	stats RecoveryStats
@@ -62,7 +62,7 @@ func NewRecoveryManager(wal *wal.WAL, walPath string, pageStore *memory.PageStor
 		wal:              wal,
 		walPath:          walPath,
 		pageStore:        pageStore,
-		dirtyPageTable:   make(map[primitives.PageID]primitives.LSN),
+		dirtyPageTable:   make(map[primitives.HashCode]primitives.LSN),
 		transactionTable: make(map[int64]*TransactionInfo),
 		stats:            RecoveryStats{},
 	}
@@ -102,6 +102,12 @@ func (rm *RecoveryManager) Recover() error {
 func (rm *RecoveryManager) analysisPhase() error {
 	fmt.Println("Phase 1: Analysis - scanning WAL...")
 
+	// Force flush WAL to ensure all records are on disk before reading
+	// Get the current LSN by checking the writer's current LSN
+	if err := rm.wal.Force(primitives.LSN(^uint64(0))); err != nil {
+		return fmt.Errorf("failed to flush WAL before analysis: %w", err)
+	}
+
 	reader, err := wal.NewLogReader(rm.walPath)
 	if err != nil {
 		return fmt.Errorf("failed to create WAL reader: %w", err)
@@ -109,7 +115,7 @@ func (rm *RecoveryManager) analysisPhase() error {
 	defer reader.Close()
 
 	// Reset internal state
-	rm.dirtyPageTable = make(map[primitives.PageID]primitives.LSN)
+	rm.dirtyPageTable = make(map[primitives.HashCode]primitives.LSN)
 	rm.transactionTable = make(map[int64]*TransactionInfo)
 
 	// Scan entire WAL from beginning
@@ -207,9 +213,9 @@ func (rm *RecoveryManager) processAnalysisRecord(rec *record.LogRecord) error {
 		}
 
 		// Add to dirty page table if not already present
-		pageID := rec.PageID
-		if _, exists := rm.dirtyPageTable[pageID]; !exists {
-			rm.dirtyPageTable[pageID] = rec.LSN
+		pageHash := rec.PageID.HashCode()
+		if _, exists := rm.dirtyPageTable[pageHash]; !exists {
+			rm.dirtyPageTable[pageHash] = rec.LSN
 		}
 
 	case record.CLRRecord:
@@ -220,9 +226,9 @@ func (rm *RecoveryManager) processAnalysisRecord(rec *record.LogRecord) error {
 		}
 
 		// CLR also dirties pages
-		pageID := rec.PageID
-		if _, exists := rm.dirtyPageTable[pageID]; !exists {
-			rm.dirtyPageTable[pageID] = rec.LSN
+		pageHash := rec.PageID.HashCode()
+		if _, exists := rm.dirtyPageTable[pageHash]; !exists {
+			rm.dirtyPageTable[pageHash] = rec.LSN
 		}
 	}
 
@@ -282,7 +288,8 @@ func (rm *RecoveryManager) redoRecord(rec *record.LogRecord) error {
 	switch rec.Type {
 	case record.UpdateRecord, record.InsertRecord, record.CLRRecord:
 		// Check if this page is in the dirty page table
-		if firstLSN, isDirty := rm.dirtyPageTable[rec.PageID]; isDirty {
+		pageHash := rec.PageID.HashCode()
+		if firstLSN, isDirty := rm.dirtyPageTable[pageHash]; isDirty {
 			// Only redo if this record dirtied the page or came after
 			if rec.LSN >= firstLSN {
 				// Apply the after-image to the page
@@ -424,8 +431,9 @@ func (rm *RecoveryManager) undoTransaction(txnInfo *TransactionInfo) error {
 		currentLSN = rec.PrevLSN
 	}
 
-	// Mark transaction as aborted in WAL
-	if _, err := rm.wal.LogAbort(txnInfo.TID); err != nil {
+	// Mark transaction as aborted in WAL during recovery
+	// We use LogAbortDuringRecovery because the transaction is not in the active transactions table
+	if _, err := rm.wal.LogAbortDuringRecovery(txnInfo.TID, txnInfo.LastLSN); err != nil {
 		return fmt.Errorf("failed to log abort: %w", err)
 	}
 
@@ -479,11 +487,11 @@ func (rm *RecoveryManager) ResetStats() {
 }
 
 // GetDirtyPageTable returns a copy of the dirty page table
-func (rm *RecoveryManager) GetDirtyPageTable() map[primitives.PageID]primitives.LSN {
+func (rm *RecoveryManager) GetDirtyPageTable() map[primitives.HashCode]primitives.LSN {
 	rm.mutex.RLock()
 	defer rm.mutex.RUnlock()
 
-	result := make(map[primitives.PageID]primitives.LSN)
+	result := make(map[primitives.HashCode]primitives.LSN)
 	for k, v := range rm.dirtyPageTable {
 		result[k] = v
 	}
@@ -525,6 +533,11 @@ func (rm *RecoveryManager) GetUncommittedTransactions() []*primitives.Transactio
 
 // IsRecoveryNeeded checks if recovery is needed by examining the WAL
 func (rm *RecoveryManager) IsRecoveryNeeded() (bool, error) {
+	// Force flush WAL to ensure all records are on disk before reading
+	if err := rm.wal.Force(primitives.LSN(^uint64(0))); err != nil {
+		return false, fmt.Errorf("failed to flush WAL before checking: %w", err)
+	}
+
 	reader, err := wal.NewLogReader(rm.walPath)
 	if err != nil {
 		return false, fmt.Errorf("failed to create WAL reader: %w", err)
@@ -532,7 +545,8 @@ func (rm *RecoveryManager) IsRecoveryNeeded() (bool, error) {
 	defer reader.Close()
 
 	// Check if there are any uncommitted transactions
-	activeTxns := make(map[*primitives.TransactionID]bool)
+	// Use TID.ID() as key since deserialized TIDs are different instances
+	activeTxns := make(map[int64]bool)
 
 	for {
 		rec, err := reader.ReadNext()
@@ -542,9 +556,9 @@ func (rm *RecoveryManager) IsRecoveryNeeded() (bool, error) {
 
 		switch rec.Type {
 		case record.BeginRecord:
-			activeTxns[rec.TID] = true
+			activeTxns[rec.TID.ID()] = true
 		case record.CommitRecord, record.AbortRecord:
-			delete(activeTxns, rec.TID)
+			delete(activeTxns, rec.TID.ID())
 		}
 	}
 

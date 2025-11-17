@@ -201,6 +201,17 @@ func (w *WAL) writeRecord(rec *record.LogRecord) (primitives.LSN, error) {
 	return w.writer.Write(data)
 }
 
+// LogAbortDuringRecovery logs an abort record during recovery without requiring
+// the transaction to be in the active transactions table.
+// This is used by the recovery manager when undoing uncommitted transactions.
+func (w *WAL) LogAbortDuringRecovery(tid *primitives.TransactionID, prevLSN primitives.LSN) (primitives.LSN, error) {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+
+	rec := record.NewLogRecord(record.AbortRecord, tid, nil, nil, nil, prevLSN)
+	return w.writeRecord(rec)
+}
+
 // Force ensures all log records up to the given primitives.LSN are on disk
 // This is called during commit to ensure durability
 func (w *WAL) Force(lsn primitives.LSN) error {

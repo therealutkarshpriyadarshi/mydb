@@ -1,6 +1,7 @@
 package recovery
 
 import (
+	"hash/fnv"
 	"path/filepath"
 	"testing"
 
@@ -46,7 +47,10 @@ func (m *mockPageID) String() string {
 }
 
 func (m *mockPageID) HashCode() primitives.HashCode {
-	return primitives.HashCode(uint64(m.fileID)*1000 + uint64(m.pageNo))
+	// Use FNV hash like the real PageDescriptor
+	h := fnv.New64a()
+	h.Write(m.Serialize())
+	return primitives.HashCode(h.Sum64())
 }
 
 func newMockPageID(id int) primitives.PageID {
@@ -300,7 +304,7 @@ func TestAnalysisPhase_MultipleUpdatesToSamePage(t *testing.T) {
 	}
 
 	// The LSN should be from the FIRST update
-	if lsn, exists := rm.dirtyPageTable[pageID]; !exists {
+	if lsn, exists := rm.dirtyPageTable[pageID.HashCode()]; !exists {
 		t.Error("Page 1 not in dirty page table")
 	} else if lsn != firstUpdateLSN {
 		t.Errorf("Expected first update LSN %d, got %d", firstUpdateLSN, lsn)
@@ -374,7 +378,7 @@ func TestProcessAnalysisRecord_UpdateRecord(t *testing.T) {
 	}
 
 	// Check dirty page table
-	lsn, exists := rm.dirtyPageTable[pageID]
+	lsn, exists := rm.dirtyPageTable[pageID.HashCode()]
 	if !exists {
 		t.Fatal("Page not added to dirty page table")
 	}
@@ -397,7 +401,7 @@ func TestRedoPhase_NoDirtyPages(t *testing.T) {
 	rm := NewRecoveryManager(testWAL, walPath, nil)
 
 	// Empty dirty page table
-	rm.dirtyPageTable = make(map[primitives.PageID]primitives.LSN)
+	rm.dirtyPageTable = make(map[primitives.HashCode]primitives.LSN)
 
 	err := rm.redoPhase()
 	if err != nil {
@@ -441,7 +445,7 @@ func TestRedoPhase_WithDirtyPages(t *testing.T) {
 	}
 
 	// Verify the update LSN is in dirty page table
-	if lsn, exists := rm.dirtyPageTable[pageID]; !exists {
+	if lsn, exists := rm.dirtyPageTable[pageID.HashCode()]; !exists {
 		t.Error("Page should be in dirty page table")
 	} else if lsn != updateLSN {
 		t.Errorf("Expected LSN=%d, got %d", updateLSN, lsn)
@@ -569,8 +573,10 @@ func TestGetDirtyPageTable(t *testing.T) {
 	rm := NewRecoveryManager(testWAL, walPath, nil)
 
 	// Add some dirty pages
-	rm.dirtyPageTable[newMockPageID(1)] = 100
-	rm.dirtyPageTable[newMockPageID(2)] = 200
+	page1 := newMockPageID(1)
+	page2 := newMockPageID(2)
+	rm.dirtyPageTable[page1.HashCode()] = 100
+	rm.dirtyPageTable[page2.HashCode()] = 200
 
 	table := rm.GetDirtyPageTable()
 
@@ -578,14 +584,15 @@ func TestGetDirtyPageTable(t *testing.T) {
 		t.Errorf("Expected 2 dirty pages, got %d", len(table))
 	}
 
-	if table[newMockPageID(1)] != 100 {
+	if table[page1.HashCode()] != 100 {
 		t.Error("Dirty page LSN incorrect")
 	}
 
 	// Verify it's a copy (modifying returned table shouldn't affect original)
-	table[newMockPageID(3)] = 300
+	page3 := newMockPageID(3)
+	table[page3.HashCode()] = 300
 
-	if _, exists := rm.dirtyPageTable[newMockPageID(3)]; exists {
+	if _, exists := rm.dirtyPageTable[page3.HashCode()]; exists {
 		t.Error("Modifying returned table affected original")
 	}
 }
@@ -838,7 +845,7 @@ func TestAnalysisPhase_CLRRecords(t *testing.T) {
 	}
 
 	// CLR should still mark the page as dirty
-	if _, exists := rm.dirtyPageTable[newMockPageID(1)]; !exists {
+	if _, exists := rm.dirtyPageTable[newMockPageID(1).HashCode()]; !exists {
 		t.Error("Page should be in dirty page table after CLR")
 	}
 
