@@ -18,7 +18,8 @@ var (
 	Indexes         = &IndexesTable{}
 	ColumnStats     = &ColumnStatsTable{}
 	IndexStats      = &IndexStatsTable{}
-	AllSystemTables = []SystemTable{Tables, Columns, Stats, Indexes, ColumnStats, IndexStats}
+	Constraints     = &ConstraintsTable{}
+	AllSystemTables = []SystemTable{Tables, Columns, Stats, Indexes, ColumnStats, IndexStats, Constraints}
 )
 
 // SystemTable defines the interface that all system catalog tables must implement.
