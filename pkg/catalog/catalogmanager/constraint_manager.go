@@ -361,9 +361,12 @@ func (cm *CatalogManager) DisableConstraint(tx TxContext, constraintID primitive
 // GetConstraintValidator returns a validator for constraint checking.
 // The validator can be used to validate DML operations against constraints.
 //
+// Parameters:
+//   - indexSearcher: Interface for searching indexes (can be nil, disables UNIQUE validation)
+//
 // Returns a new Validator instance.
-func (cm *CatalogManager) GetConstraintValidator() *constraints.Validator {
-	return constraints.NewValidator(cm.constraintOps, cm.colOps)
+func (cm *CatalogManager) GetConstraintValidator(indexSearcher constraints.IndexSearcher) *constraints.Validator {
+	return constraints.NewValidator(cm.constraintOps, cm.colOps, cm.indexOps, indexSearcher)
 }
 
 // generateConstraintID generates a unique ID for a constraint based on table ID and constraint name.

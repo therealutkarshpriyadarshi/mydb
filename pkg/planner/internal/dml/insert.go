@@ -167,6 +167,22 @@ func (p *InsertPlan) insertTuples(tableID primitives.FileID, tupleDesc *tuple.Tu
 		return 0, fmt.Errorf("failed to get table file: %v", err)
 	}
 
+	// Get table metadata for constraint validation
+	tableMeta, err := cm.GetTableMetadataByID(p.tx, tableID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get table metadata: %v", err)
+	}
+
+	// Get table schema for constraint validation
+	schema, err := cm.GetTableSchema(p.tx, tableID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get table schema: %v", err)
+	}
+
+	// Create index searcher for UNIQUE constraint validation
+	indexSearcher := p.ctx.IndexManager().NewIndexSearcher(p.ctx.IndexManager())
+	validator := cm.GetConstraintValidator(indexSearcher)
+
 	insertedCount := 0
 	for _, values := range p.statement.Values {
 		if err := validateValueCount(values, tupleDesc, fieldMapping, autoIncInfo); err != nil {
@@ -175,6 +191,11 @@ func (p *InsertPlan) insertTuples(tableID primitives.FileID, tupleDesc *tuple.Tu
 
 		newTuple, err := createTuple(values, tupleDesc, fieldMapping, autoIncInfo)
 		if err != nil {
+			return 0, err
+		}
+
+		// Validate constraints before insertion
+		if err := validator.ValidateInsert(p.tx, tableID, tableMeta.TableName, newTuple, schema); err != nil {
 			return 0, err
 		}
 

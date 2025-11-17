@@ -132,6 +132,12 @@ func (im *IndexManager) NewFileOps(filePath primitives.Filepath) *IndexFileOps {
 	}
 }
 
+// NewIndexSearcher creates a new IndexSearcher for searching indexes.
+// This is used by constraint validation to check for duplicate values in UNIQUE constraints.
+func (im *IndexManager) NewIndexSearcher(indexManager *IndexManager) *IndexSearcherImpl {
+	return NewIndexSearcher(indexManager)
+}
+
 // CreatePhysicalIndex creates a physical index file and returns its file ID.
 // This is a convenience wrapper that delegates to IndexFileOps.
 func (im *IndexManager) CreatePhysicalIndex(filePath primitives.Filepath, keyType types.Type, indexType index.IndexType) (primitives.FileID, error) {

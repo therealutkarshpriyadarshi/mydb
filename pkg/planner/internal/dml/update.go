@@ -129,11 +129,34 @@ func (p *UpdatePlan) updateTuples(tuples []*tuple.Tuple, updateMap updatedColMap
 	if err != nil {
 		return err
 	}
+
+	// Get table metadata for constraint validation
+	tableMeta, err := ctm.GetTableMetadataByID(p.tx, tableID)
+	if err != nil {
+		return fmt.Errorf("failed to get table metadata: %v", err)
+	}
+
+	// Get table schema for constraint validation
+	schema, err := ctm.GetTableSchema(p.tx, tableID)
+	if err != nil {
+		return fmt.Errorf("failed to get table schema: %v", err)
+	}
+
+	// Create index searcher for UNIQUE constraint validation
+	indexSearcher := p.ctx.IndexManager().NewIndexSearcher(p.ctx.IndexManager())
+	validator := ctm.GetConstraintValidator(indexSearcher)
+
 	for _, old := range tuples {
 		newTup, err := old.WithUpdatedFields(updateMap)
 		if err != nil {
 			return err
 		}
+
+		// Validate constraints before update
+		if err := validator.ValidateUpdate(p.tx, tableID, tableMeta.TableName, old, newTup, schema); err != nil {
+			return err
+		}
+
 		if err := tupleMgr.UpdateTuple(p.tx, file, old, newTup); err != nil {
 			return fmt.Errorf("failed to update tuple: %v", err)
 		}
