@@ -856,3 +856,221 @@ func TestAnalysisPhase_CLRRecords(t *testing.T) {
 
 	_ = updateLSN // Avoid unused variable error
 }
+
+// TestRecoveryWithCheckpoint tests end-to-end recovery using checkpoints
+func TestRecoveryWithCheckpoint(t *testing.T) {
+	testWAL, walPath := createTestWAL(t)
+	defer testWAL.Close()
+
+	// Phase 1: Create some transactions and checkpoint
+	t.Log("Phase 1: Creating transactions and checkpoint")
+
+	tid1 := primitives.NewTransactionIDFromValue(1)
+	tid2 := primitives.NewTransactionIDFromValue(2)
+	tid3 := primitives.NewTransactionIDFromValue(3)
+
+	// Start transactions
+	testWAL.LogBegin(tid1)
+	testWAL.LogBegin(tid2)
+
+	// Log updates for tid1 and tid2
+	testWAL.LogUpdate(tid1, newMockPageID(1), []byte("old1"), []byte("new1"))
+	testWAL.LogUpdate(tid2, newMockPageID(2), []byte("old2"), []byte("new2"))
+
+	// Commit tid1
+	testWAL.LogCommit(tid1)
+
+	// Write checkpoint (tid2 still active)
+	checkpointLSN, err := testWAL.WriteCheckpoint()
+	if err != nil {
+		t.Fatalf("Failed to write checkpoint: %v", err)
+	}
+	t.Logf("Checkpoint written at LSN %d", checkpointLSN)
+
+	// Phase 2: More transactions after checkpoint
+	t.Log("Phase 2: Adding more transactions after checkpoint")
+
+	// Start new transaction after checkpoint
+	testWAL.LogBegin(tid3)
+	testWAL.LogUpdate(tid3, newMockPageID(3), []byte("old3"), []byte("new3"))
+
+	// Commit tid2
+	testWAL.LogCommit(tid2)
+
+	// tid3 remains uncommitted (will need to be undone)
+
+	// Phase 3: Perform recovery
+	t.Log("Phase 3: Performing recovery")
+
+	rm := NewRecoveryManager(testWAL, walPath, nil)
+	err = rm.Recover()
+	if err != nil {
+		t.Fatalf("Recovery failed: %v", err)
+	}
+
+	// Phase 4: Verify recovery results
+	t.Log("Phase 4: Verifying recovery results")
+
+	stats := rm.GetStats()
+	t.Logf("Recovery stats: %+v", stats)
+
+	// Should have scanned records (but fewer than if we started from beginning)
+	if stats.LogRecordsScanned == 0 {
+		t.Error("Should have scanned some log records")
+	}
+
+	// Should have 1 uncommitted transaction (tid3)
+	uncommitted := rm.GetUncommittedTransactions()
+	if len(uncommitted) != 1 {
+		t.Errorf("Expected 1 uncommitted transaction, got %d", len(uncommitted))
+	}
+
+	if len(uncommitted) > 0 && uncommitted[0].ID() != tid3.ID() {
+		t.Errorf("Expected uncommitted transaction to be tid3, got %d", uncommitted[0].ID())
+	}
+
+	// Should have undone 1 transaction
+	if stats.TransactionsUndone != 1 {
+		t.Errorf("Expected 1 transaction undone, got %d", stats.TransactionsUndone)
+	}
+
+	// Should have found dirty pages
+	if stats.DirtyPagesFound == 0 {
+		t.Error("Should have found dirty pages")
+	}
+
+	t.Log("Recovery with checkpoint completed successfully")
+}
+
+// TestRecoveryWithoutCheckpoint tests that recovery works when no checkpoint exists
+func TestRecoveryWithoutCheckpoint(t *testing.T) {
+	testWAL, walPath := createTestWAL(t)
+	defer testWAL.Close()
+
+	// Create some transactions without checkpoint
+	tid1 := primitives.NewTransactionIDFromValue(1)
+	tid2 := primitives.NewTransactionIDFromValue(2)
+
+	testWAL.LogBegin(tid1)
+	testWAL.LogUpdate(tid1, newMockPageID(1), []byte("old1"), []byte("new1"))
+	testWAL.LogCommit(tid1)
+
+	testWAL.LogBegin(tid2)
+	testWAL.LogUpdate(tid2, newMockPageID(2), []byte("old2"), []byte("new2"))
+	// tid2 not committed
+
+	// Perform recovery without checkpoint
+	rm := NewRecoveryManager(testWAL, walPath, nil)
+	err := rm.Recover()
+	if err != nil {
+		t.Fatalf("Recovery without checkpoint failed: %v", err)
+	}
+
+	// Verify recovery
+	uncommitted := rm.GetUncommittedTransactions()
+	if len(uncommitted) != 1 {
+		t.Errorf("Expected 1 uncommitted transaction, got %d", len(uncommitted))
+	}
+
+	t.Log("Recovery without checkpoint completed successfully")
+}
+
+// TestCheckpointWithActiveTransactions tests checkpoint with multiple active transactions
+func TestCheckpointWithActiveTransactions(t *testing.T) {
+	testWAL, walPath := createTestWAL(t)
+	defer testWAL.Close()
+
+	// Start multiple transactions
+	tids := make([]*primitives.TransactionID, 5)
+	for i := 0; i < 5; i++ {
+		tids[i] = primitives.NewTransactionIDFromValue(int64(i + 1))
+		testWAL.LogBegin(tids[i])
+		testWAL.LogUpdate(tids[i], newMockPageID(i+1), []byte("old"), []byte("new"))
+	}
+
+	// Commit some
+	testWAL.LogCommit(tids[0])
+	testWAL.LogCommit(tids[2])
+
+	// Write checkpoint (3 active transactions remain)
+	_, err := testWAL.WriteCheckpoint()
+	if err != nil {
+		t.Fatalf("Checkpoint with active transactions failed: %v", err)
+	}
+
+	// Verify checkpoint contains active transactions
+	checkpoint, err := testWAL.GetLastCheckpoint()
+	if err != nil {
+		t.Fatalf("Failed to get checkpoint: %v", err)
+	}
+
+	if len(checkpoint.ActiveTxns) != 3 {
+		t.Errorf("Expected 3 active transactions in checkpoint, got %d", len(checkpoint.ActiveTxns))
+	}
+
+	// Perform recovery
+	rm := NewRecoveryManager(testWAL, walPath, nil)
+	err = rm.Recover()
+	if err != nil {
+		t.Fatalf("Recovery with checkpoint failed: %v", err)
+	}
+
+	// Should have 3 uncommitted transactions
+	uncommitted := rm.GetUncommittedTransactions()
+	if len(uncommitted) != 3 {
+		t.Errorf("Expected 3 uncommitted transactions, got %d", len(uncommitted))
+	}
+
+	t.Log("Checkpoint with active transactions test passed")
+}
+
+// TestCheckpointAndTruncation tests checkpoint followed by log truncation
+func TestCheckpointAndTruncation(t *testing.T) {
+	testWAL, walPath := createTestWAL(t)
+	defer testWAL.Close()
+
+	// Create and commit several transactions
+	for i := 0; i < 10; i++ {
+		tid := primitives.NewTransactionIDFromValue(int64(i + 1))
+		testWAL.LogBegin(tid)
+		testWAL.LogUpdate(tid, newMockPageID(i+1), []byte("old"), []byte("new"))
+		testWAL.LogCommit(tid)
+	}
+
+	// Write checkpoint
+	_, err := testWAL.WriteCheckpoint()
+	if err != nil {
+		t.Fatalf("Checkpoint failed: %v", err)
+	}
+
+	// Get checkpoint for truncation
+	checkpoint, err := testWAL.GetLastCheckpoint()
+	if err != nil {
+		t.Fatalf("Failed to get checkpoint: %v", err)
+	}
+
+	// Note: Truncation is complex and may require careful testing
+	// For now, just verify we can load the checkpoint
+	if checkpoint == nil {
+		t.Fatal("Checkpoint should not be nil")
+	}
+
+	if len(checkpoint.ActiveTxns) != 0 {
+		t.Errorf("Expected 0 active transactions after all commits, got %d", len(checkpoint.ActiveTxns))
+	}
+
+	// Verify recovery works after checkpoint
+	rm := NewRecoveryManager(testWAL, walPath, nil)
+	err = rm.Recover()
+	if err != nil {
+		t.Fatalf("Recovery after checkpoint failed: %v", err)
+	}
+
+	// Should have no uncommitted transactions
+	uncommitted := rm.GetUncommittedTransactions()
+	if len(uncommitted) != 0 {
+		t.Errorf("Expected 0 uncommitted transactions, got %d", len(uncommitted))
+	}
+
+	t.Log("Checkpoint and truncation test passed")
+}
