@@ -95,10 +95,11 @@ func (rm *RecoveryManager) Recover() error {
 	return nil
 }
 
-// analysisPhase scans the entire WAL to:
-// 1. Build the dirty page table (which pages were modified)
-// 2. Build the transaction table (which transactions were active)
-// 3. Identify uncommitted transactions that need to be undone
+// analysisPhase scans the WAL to:
+// 1. Load the last checkpoint (if exists) to initialize state
+// 2. Build the dirty page table (which pages were modified)
+// 3. Build the transaction table (which transactions were active)
+// 4. Identify uncommitted transactions that need to be undone
 func (rm *RecoveryManager) analysisPhase() error {
 	fmt.Println("Phase 1: Analysis - scanning WAL...")
 
@@ -108,22 +109,61 @@ func (rm *RecoveryManager) analysisPhase() error {
 		return fmt.Errorf("failed to flush WAL before analysis: %w", err)
 	}
 
+	// Reset internal state
+	rm.dirtyPageTable = make(map[primitives.HashCode]primitives.LSN)
+	rm.transactionTable = make(map[int64]*TransactionInfo)
+
+	// Try to load the last checkpoint
+	startLSN := primitives.LSN(0)
+	checkpoint, err := rm.wal.GetLastCheckpoint()
+	if err != nil {
+		fmt.Printf("Warning: failed to load checkpoint: %v\n", err)
+		// Continue with recovery from beginning
+	} else if checkpoint != nil {
+		// Initialize state from checkpoint
+		fmt.Printf("Found checkpoint at LSN %d: %d active transactions, %d dirty pages\n",
+			checkpoint.LSN, len(checkpoint.ActiveTxns), len(checkpoint.DirtyPages))
+
+		// Load dirty page table from checkpoint
+		for pageHash, lsn := range checkpoint.DirtyPages {
+			rm.dirtyPageTable[pageHash] = lsn
+		}
+
+		// Load transaction table from checkpoint
+		for tidID, txnInfo := range checkpoint.ActiveTxns {
+			rm.transactionTable[tidID] = &TransactionInfo{
+				TID:         primitives.NewTransactionIDFromValue(tidID),
+				Status:      TxnActive,
+				FirstLSN:    txnInfo.FirstLSN,
+				LastLSN:     txnInfo.LastLSN,
+				UndoNextLSN: txnInfo.UndoNextLSN,
+			}
+		}
+
+		// Start scanning from checkpoint LSN
+		startLSN = checkpoint.LSN
+		fmt.Printf("Starting analysis from checkpoint LSN %d\n", startLSN)
+	} else {
+		fmt.Println("No checkpoint found, starting analysis from beginning")
+	}
+
 	reader, err := wal.NewLogReader(rm.walPath)
 	if err != nil {
 		return fmt.Errorf("failed to create WAL reader: %w", err)
 	}
 	defer reader.Close()
 
-	// Reset internal state
-	rm.dirtyPageTable = make(map[primitives.HashCode]primitives.LSN)
-	rm.transactionTable = make(map[int64]*TransactionInfo)
-
-	// Scan entire WAL from beginning
+	// Scan WAL from startLSN (either checkpoint LSN or 0)
 	for {
 		logRecord, err := reader.ReadNext()
 		if err != nil {
 			// End of log reached
 			break
+		}
+
+		// Skip records before our start LSN
+		if logRecord.LSN < startLSN {
+			continue
 		}
 
 		rm.stats.LogRecordsScanned++
@@ -153,6 +193,18 @@ func (rm *RecoveryManager) analysisPhase() error {
 
 // processAnalysisRecord processes a single log record during the analysis phase
 func (rm *RecoveryManager) processAnalysisRecord(rec *record.LogRecord) error {
+	switch rec.Type {
+	case record.CheckpointBegin, record.CheckpointEnd:
+		// Checkpoint records don't need processing during analysis
+		// (they were already loaded by analysisPhase if they exist)
+		return nil
+	}
+
+	// All other record types require a transaction ID
+	if rec.TID == nil {
+		return fmt.Errorf("log record at LSN %d has no transaction ID", rec.LSN)
+	}
+
 	tid := rec.TID
 	tidID := tid.ID()
 
