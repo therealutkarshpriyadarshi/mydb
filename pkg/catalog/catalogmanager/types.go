@@ -35,10 +35,12 @@ type (
 //   - CATALOG_INDEXES: index metadata
 //   - CATALOG_COLUMN_STATISTICS: column-level statistics
 //   - CATALOG_INDEX_STATISTICS: index statistics
+//   - CATALOG_CONSTRAINTS: constraint metadata
 type SystemTableIDs struct {
 	TablesTableID, StatisticsTableID        primitives.FileID
 	ColumnsTableID, ColumnStatisticsTableID primitives.FileID
 	IndexesTableID, IndexStatisticsTableID  primitives.FileID
+	ConstraintsTableID                      primitives.FileID
 }
 
 // GetSysTable returns the SystemTable interface for a given system table ID.
@@ -57,6 +59,8 @@ func (st *SystemTableIDs) GetSysTable(id primitives.FileID) (systemtable.SystemT
 		return systemtable.ColumnStats, nil
 	case st.IndexStatisticsTableID:
 		return systemtable.IndexStats, nil
+	case st.ConstraintsTableID:
+		return systemtable.Constraints, nil
 	default:
 		return nil, fmt.Errorf("unknown system table ID: %d", id)
 	}
@@ -78,6 +82,8 @@ func (st *SystemTableIDs) SetSystemTableID(tableName string, tableID primitives.
 		st.ColumnStatisticsTableID = tableID
 	case systemtable.IndexStats.TableName():
 		st.IndexStatisticsTableID = tableID
+	case systemtable.Constraints.TableName():
+		st.ConstraintsTableID = tableID
 	}
 }
 

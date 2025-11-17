@@ -47,12 +47,13 @@ type CatalogManager struct {
 	openFiles map[primitives.FileID]*heap.HeapFile
 
 	// Domain-specific operation handlers
-	indexOps      *ops.IndexOperations
-	colOps        *ops.ColumnOperations
-	statsOps      *ops.StatsOperations
-	tableOps      *ops.TableOperations
-	colStatsOps   *ops.ColStatsOperations
-	indexStatsOps *ops.IndexStatsOperations
+	indexOps       *ops.IndexOperations
+	colOps         *ops.ColumnOperations
+	statsOps       *ops.StatsOperations
+	tableOps       *ops.TableOperations
+	colStatsOps    *ops.ColStatsOperations
+	indexStatsOps  *ops.IndexStatsOperations
+	constraintOps  *ops.ConstraintOperations
 }
 
 // NewCatalogManager creates a new CatalogManager instance.
@@ -90,6 +91,7 @@ func NewCatalogManager(ps *memory.PageStore, dataDir string) *CatalogManager {
 //   - CATALOG_INDEXES: index metadata (ID, name, table ID, column, type, file path)
 //   - CATALOG_COLUMN_STATISTICS: column-level statistics for selectivity estimation
 //   - CATALOG_INDEX_STATISTICS: index statistics for query optimization
+//   - CATALOG_CONSTRAINTS: constraint metadata (ID, name, type, columns, referenced table)
 //
 // The operation handlers are initialized after system tables are created.
 // The transaction is committed upon successful completion.
@@ -139,6 +141,7 @@ func (cm *CatalogManager) Initialize(ctx TxContext) error {
 //   - tableOps: Manages table metadata in CATALOG_TABLES
 //   - colStatsOps: Manages column statistics in CATALOG_COLUMN_STATISTICS
 //   - indexStatsOps: Manages index statistics in CATALOG_INDEX_STATISTICS
+//   - constraintOps: Manages constraint metadata in CATALOG_CONSTRAINTS
 //
 // Dependencies:
 //   - All handlers depend on CatalogIO for low-level read/write operations
@@ -155,4 +158,5 @@ func (cm *CatalogManager) setupSysTables() {
 	cm.tableOps = ops.NewTableOperations(cm.io, cm.SystemTabs.TablesTableID)
 	cm.colStatsOps = ops.NewColStatsOperations(cm.io, cm.SystemTabs.ColumnStatisticsTableID, cm.tableCache.GetDbFile, cm.colOps)
 	cm.indexStatsOps = ops.NewIndexStatsOperations(cm.io, cm.SystemTabs.IndexStatisticsTableID, cm.SystemTabs.IndexesTableID, cm.tableCache.GetDbFile, cm.statsOps)
+	cm.constraintOps = ops.NewConstraintOperations(cm.io, cm.SystemTabs.ConstraintsTableID)
 }
